@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+ENV/
+
+# Build / distribuição
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+MANIFEST
+
+# Ferramentas de desenvolvimento
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Editores e IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Variáveis de ambiente
+.env
+.envrc
+
+# ─── key_lock — arquivos sensíveis ────────────────────────────────────────────
+
+# Cofres e chaves — NUNCA versionar
+*.vault
+*.vaultkey
+*.vault.lock
+*.vault.tmp
+
+# Segredo de máquina local
+machine_secret.key
+~/.config/key_lock/
+
+# Metadata anti-rollback (específico por máquina)
+.key_lock_meta/
+
+# Contadores de falha persistidos
+*_fail.json
+
+# Arquivos temporários de escrita atômica
+*.tmp

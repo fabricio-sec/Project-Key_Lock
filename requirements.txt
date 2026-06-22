@@ -1,0 +1,33 @@
+# key_lock — dependências de produção
+# Testado com Python 3.12. Requer Python >= 3.10 (uso de `X | Y` em type hints).
+#
+# Instalação:
+#   pip install -r requirements.txt
+#
+# Para desenvolvimento (inclui testes):
+#   pip install -r requirements.txt pytest
+
+# ── Criptografia ──────────────────────────────────────────────────────────────
+
+# Argon2id — KDF resistente a GPU/ASIC para derivação de chave a partir de passphrase
+argon2-cffi>=25.1.0
+
+# AES-256-GCM, X25519 ECDH, HKDF-SHA256, serialização de chaves
+cryptography>=44.0.0
+
+# ── Mnemônico BIP-39 ──────────────────────────────────────────────────────────
+
+# Conversão entre bytes e frases de 24 palavras (chave de recuperação)
+mnemonic>=0.21
+
+# ── Interface / UX ────────────────────────────────────────────────────────────
+
+# Clipboard (opcional mas recomendado — auto-wipe após 30 s)
+# GUI (gui.py) usa apenas tkinter, que já vem com o Python padrão
+pyperclip>=1.8.0
+
+# Preview de imagens dentro do cofre (PNG, JPG, GIF, BMP, WEBP)
+Pillow>=10.0.0
+
+# ── Desenvolvimento / Testes (não instalar em produção) ───────────────────────
+# pytest>=8.0.0
