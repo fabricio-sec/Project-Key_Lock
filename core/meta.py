@@ -68,6 +68,22 @@ def check_and_update_meta(vault_path: str, contents: dict, *, force_accept: bool
     mp = _meta_path(vault_path)
 
     if not mp.exists():
+        # Se o vault possui entradas ou arquivos, o metadata deveria existir.
+        # Ausência pode indicar deleção maliciosa combinada com substituição do
+        # .vault por versão antiga (ataque de rollback via remoção do metadata).
+        # Para cofres recém-criados (sem dados), é normal não ter metadata ainda.
+        has_data = bool(contents.get("entries")) or bool(contents.get("files"))
+        if has_data and not force_accept:
+            raise ValueError(
+                f"⚠️  AVISO DE SEGURANÇA: O arquivo de metadata anti-rollback está AUSENTE "
+                f"para um cofre que já contém dados.\n"
+                f"   Arquivo esperado: {mp}\n"
+                f"   Isso pode indicar deleção do metadata combinada com substituição "
+                f"do cofre por uma versão mais antiga (ataque de rollback).\n"
+                f"   Se você moveu o cofre de outra máquina ou o metadata foi perdido "
+                f"legitimamente, use a opção explícita de aceitar metadata ausente.\n"
+                f"   Para aceitar explicitamente: abra com force_accept_meta=True."
+            )
         write_meta(vault_path, vault_ts)
         return
 

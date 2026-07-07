@@ -25,7 +25,7 @@ from core.crypto import (
     secure_zero,
 )
 from core.mnemonic import format_mnemonic_display
-from core.vault_format import MIN_PIN_LENGTH
+from core.vault_format import MIN_PIN_LENGTH, write_vaultkey_file
 
 RED    = "\033[91m"
 GREEN  = "\033[92m"
@@ -122,9 +122,7 @@ def cmd_create(vault_path: str):
     info("Derivando chave com Argon2id (pode demorar alguns segundos)...")
     mnemonic_phrase, vaultkey_content = create_vault(passphrase, vault_path, vaultkey_pin)
 
-    fd = os.open(vaultkey_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(vaultkey_content)
+    write_vaultkey_file(vaultkey_path, vaultkey_content)
 
     ok(f"Cofre criado: {vault_path}")
     ok(f"Chave de recuperação salva: {vaultkey_path}")
@@ -210,9 +208,7 @@ def cmd_recover(vault_path: str, vaultkey_path: str):
         err(str(e))
         return
 
-    fd = os.open(vaultkey_path_new, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(new_vaultkey_content)
+    write_vaultkey_file(vaultkey_path_new, new_vaultkey_content)
 
     ok("Credenciais rotacionadas com sucesso!")
     ok(f"Novo .vaultkey salvo em: {vaultkey_path_new}")
@@ -250,9 +246,7 @@ def cmd_rekey(vault_path: str):
         err(str(e))
         return
 
-    fd = os.open(vaultkey_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(new_vaultkey_content)
+    write_vaultkey_file(vaultkey_path, new_vaultkey_content)
 
     ok("Chave mestra rotacionada com sucesso!")
     ok(f"Novo .vaultkey salvo em: {vaultkey_path}")

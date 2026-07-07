@@ -1,6 +1,6 @@
 # Security Policy — key_lock
 
-Versão da política: 2.4.2 | Atualizado: junho 2026
+Versão da política: 2.4.6 | Atualizado: julho 2026
 
 ---
 
@@ -12,6 +12,8 @@ Versão da política: 2.4.2 | Atualizado: junho 2026
 | 2.3.x  | ⚠️ Somente vulnerabilidades críticas |
 | 2.2.x  | ❌ Sem suporte       |
 | < 2.2  | ❌ Sem suporte       |
+
+> Versão atual recomendada: **2.4.6**
 
 Recomendação: atualize para a versão mais recente. Versões anteriores podem ter vulnerabilidades documentadas no CHANGELOG.
 
@@ -103,6 +105,8 @@ Todos os blobs AES-GCM usam Additional Authenticated Data distintos para impedir
 | C-04 | Token de ownership no `VaultLock` — previne remoção de lock alheio | `core/filelock.py` |
 | C-05 | Senha vazia rejeitada em `add_entry` | `core/vault.py` |
 | C-06 | PIN do `.vaultkey` com mínimo de 8 caracteres (validado em GUI e CLI) | `core/vault_format.py` |
+| C-07 | PIN do `.vaultkey` confirmado em todos os fluxos de criação/rotação na GUI | `gui.py` — `CreateScreen`, `RekeyDlg`, `RecoverFileScreen`, `RecoverWordsScreen` |
+| C-08 | `save_vault_with_key` usado em todos os saves de sessão na GUI — elimina re-derivação Argon2id e reduz exposição da passphrase | `gui.py` — `VaultScreen`, `_FilesView` |
 
 ### Higiene de memória
 

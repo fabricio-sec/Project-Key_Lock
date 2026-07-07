@@ -1,9 +1,95 @@
-# Changelog — key_lock
+## [2.4.6] — julho 2026
 
-Todas as mudanças notáveis neste projeto são documentadas aqui.
+Versão de segurança — corrige os 11 achados da auditoria de segurança e revisão de código de 02/07/2026 (relatório `AUDITORIA-Key_Lock-v2.4.5.md`), incluindo a causa raiz do relato de que a recuperação por 24 palavras "parava de funcionar" após uma falha na primeira tentativa.
 
-Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/).
-Versionamento seguindo [SemVer](https://semver.org/lang/pt-BR/).
+### Segurança (crítico)
+
+- **[N-01] Escrita irreversível em disco antes de operações que podem falhar em `rotate_master_key()`/`create_vault()`** (`core/vault.py`): as duas funções gravavam o novo `.vault` em disco (via `_atomic_write`) **antes** de gerar o novo mnemônico (`private_key_to_mnemonic`) e o novo `.vaultkey` (`build_vaultkey_file`). Se qualquer uma dessas duas chamadas falhasse — cenário real e não hipotético, por exemplo sob pressão de memória durante o segundo Argon2id de `build_vaultkey_file`, que aloca mais 256 MB logo após a derivação já feita minutos antes — o cofre já tinha sido re-chaveado no disco, mas o mnemônico antigo era invalidado e o novo nunca chegava a existir/ser exibido. Isso explica o relato de "a recuperação pelas 24 palavras não funciona quando se erra pela primeira vez": tecnicamente, da segunda tentativa em diante as palavras antigas realmente deixavam de ser válidas. Corrigido: ambas as funções agora geram e validam **tudo** que pode falhar (mnemônico + `.vaultkey`) antes de tocar o disco; a persistência acontece como último passo, já atômico via `os.replace`.
+
+### Segurança (alto)
+
+- **[N-02] Fluxos de recuperação descartavam o novo mnemônico gerado, mesmo em caso de sucesso** (`gui.py` — `RecoverFileScreen`, `RecoverWordsScreen`): mesmo quando a recuperação funcionava perfeitamente, o retorno de `rotate_master_key()` era descartado (`_, new_vaultkey = ...`) e o usuário nunca via as novas 24 palavras — diferente de `RekeyDlg`/`_InlineRekey`, que já exibiam corretamente via `MnemonicDlg`. Corrigido: os dois fluxos de recuperação agora capturam `new_mnemonic` e exibem `MnemonicDlg` antes de entrar no cofre, no mesmo padrão já usado pela rotação normal de chaves.
+
+- **[N-03] `.vaultkey` gravado com permissão de arquivo insegura em toda a GUI** (`gui.py`, 5 locais): `CreateScreen`, `RecoverFileScreen`, `RecoverWordsScreen`, `RekeyDlg` e `_InlineRekey` usavam `open(vaultkey_path, "w")` simples, criando o arquivo com a permissão padrão do umask do sistema (tipicamente `0644` — legível por outros usuários locais), ao contrário da CLI, que já usava `os.open(..., 0o600)` corretamente. Corrigido: novo helper único `write_vaultkey_file()` em `core/vault_format.py`, reaproveitado pelos 5 pontos da GUI e pelos 3 pontos equivalentes da CLI, sempre com permissão `0600` desde a criação do arquivo.
+
+### Segurança (médio)
+
+- **[N-04] Crash não tratado (`TclError`) no medidor de força de senha/PIN, em 5 telas** (`gui.py`): o callback de `trace_add` ligado ao `StringVar` da nova passphrase/PIN tinha seu ramo de valor vazio fora do `try/except`; como o `StringVar` sobrevive à destruição da tela (mantido vivo pelo próprio trace), um valor `.set()` recebido após a troca de tela disparava um `TclError` não tratado — reproduzido de forma determinística no fluxo de recuperação por 24 palavras usando Tkinter real sob `Xvfb`. Corrigido: novo helper único `_bind_strength_meter()`, com guarda `winfo_exists()` e todo o corpo do callback dentro do `try/except`, reaproveitado nas 5 telas afetadas (`CreateScreen`, `RecoverFileScreen`, `RecoverWordsScreen`, `RekeyDlg`, `_InlineRekey`).
+
+- **[N-05] `.vault` malformado causava `AttributeError`/`KeyError` não tratado** (`core/vault.py`, `core/cli.py`): `_load_vault_file` não validava que o JSON de nível superior era um objeto nem que os campos obrigatórios (`salt`, `master_key_blob`, `vault_blob`) existiam antes de acessá-los — um `.vault` corrompido (ex: JSON válido mas com estrutura errada) gerava traceback cru na CLI (`cmd_open`, `cmd_rebind` não tinham handler genérico). Corrigido: validação de estrutura logo após o parse do JSON, levantando `ValueError` amigável e consistente com o padrão já usado para JSON inválido.
+
+### Segurança (baixo)
+
+- **[N-06] Vazamento de event bindings globais (`bind_all`) a cada ciclo de abrir/fechar cofre** (`gui.py` — `VaultScreen`): `bind_all("<Any-KeyPress>"/"<Any-Button>")` registra o callback na janela raiz do Tk, não no widget da instância; `App._set()` destruía o frame antigo sem desfazer esses binds, acumulando handlers "zumbis" a cada reabertura (incluindo auto-lock por inatividade). Corrigido: novo método `_unbind_activity()`, chamado em `_close()` e `_auto_lock()`, mais uma rede de segurança adicional em `App._set()` que desfaz os binds de qualquer `VaultScreen` sendo substituída.
+
+- **[N-07] Corrida na criação do `machine_secret.key` na primeira execução** (`core/machine_bind.py`): `get_machine_secret()` usava `O_CREAT|O_TRUNC`, permitindo que duas primeiras-execuções concorrentes gerassem segredos diferentes e cada uma retornasse o seu, mesmo que só um fosse persistido — causando `machine_tag` mismatch espúrio no processo "perdedor". Corrigido: `O_CREAT|O_EXCL`; em caso de `FileExistsError`, o segredo já persistido é relido do disco em vez de confiar no valor gerado localmente. Validado sob concorrência real de 8 threads.
+
+- **[N-08] Falha silenciosa podia desativar a verificação de machine-binding sem aviso** (`core/vault.py`): um erro inesperado (não `MachineMismatchError`) durante a leitura do `machine_secret` era engolido por um `except Exception: pass` totalmente silencioso. Corrigido: emite `warnings.warn()` não-fatal, mantendo o comportamento de não bloquear a abertura (machine binding continua sendo defesa em profundidade, não barreira dura — THREAT_MODEL T-01), mas tornando o problema visível.
+
+### Informacional
+
+- **[N-09] Medidor de força do PIN do `.vaultkey` só existia em `CreateScreen`** (`gui.py`): `RecoverFileScreen`, `RecoverWordsScreen`, `RekeyDlg` e `_InlineRekey` validavam apenas o comprimento mínimo do novo PIN, sem indicação visual de força — justamente nos fluxos de recuperação/rotação, onde o usuário está sob mais pressão. Corrigido: as 4 telas agora ligam o mesmo `_bind_strength_meter()` também ao campo de PIN.
+
+- **[N-10] `add_entry` não limitava o tamanho do campo `password`** (`core/vault.py`): `name`/`username`/`url` já tinham teto de comprimento; `password` não. Adicionado limite de 4096 caracteres, consistente com os demais campos.
+
+- **[N-11] Dependências sem teto de versão** (`requirements.txt`): todas as dependências usavam apenas limite inferior aberto. Adicionado teto de versão (compatible release) a cada uma, reduzindo o risco de uma major release incompatível — ou comprometida via supply chain — ser instalada silenciosamente. Documentado no próprio arquivo como gerar um lockfile com hashes (`pip-compile --generate-hashes`) para builds de release reprodutíveis.
+
+### Testes
+
+- Suíte de regressão expandida de 108 para 141 casos (seções 41–51), com um teste nomeado por achado, incluindo reprodução comportamental de N-01 (falha simulada pós-escrita não deixa nenhuma mutação no `.vault`), N-04 (Tkinter real sob `Xvfb`, sem `TclError`), N-05, N-07 (concorrência real de 8 threads) e N-08.
+
+---
+
+
+
+Versão de segurança — corrige achados da auditoria adversarial de follow-up (junho/2026).
+
+### Segurança (crítico)
+
+- **[R-01] Rollback completo via deleção do metadata** (`core/meta.py`): `check_and_update_meta` recriava o arquivo de metadata silenciosamente quando ele estava ausente, independente do estado do cofre. Isso permitia um ataque em 3 passos: (1) remover `machine_tag` do .vault JSON; (2) substituir o .vault por versão antiga; (3) deletar o arquivo de metadata. O cofre abria sem bloqueio e sem erro. Corrigido: se o metadata está ausente e o cofre já contém entradas ou arquivos (`has_data = True`), a abertura é bloqueada com mensagem de aviso explícita. Cofres recém-criados sem dados ainda aceitam ausência de metadata (primeira abertura legítima).
+
+### Segurança (médio)
+
+- **[P-01] Type confusion em `version` causa TypeError não tratado** (`core/vault.py`): se um atacante modificar o campo `version` do .vault para string (ex: `"4"` em vez de `4`), as comparações `outer_version >= 3` e `outer_version >= 4` levantavam `TypeError` não capturado, crashando o processo sem mensagem amigável e sem incrementar o fail_count. Corrigido em `_load_vault_file`: o tipo de `version` é validado após parse do JSON; tipo não-inteiro levanta `ValueError` com mensagem clara.
+
+### Segurança (baixo)
+
+- **[B-02] `vault_salt` no `.vaultkey` não era verificado** (`core/vault.py`): `open_vault_with_recovery_file` descartava o `vault_salt` retornado por `parse_vaultkey_file` (`_, = ...`), tornando esse campo metadado inútil que dava falsa impressão de vínculo entre `.vaultkey` e `.vault`. Corrigido: o `vault_salt` do `.vaultkey` é comparado com o `salt` real do `.vault`. Se divergirem, abertura é bloqueada com mensagem "O arquivo .vaultkey não pertence a este cofre .vault."
+
+- **[M-01] `pin_key` era `bytes` imutável, não podia ser zerado** (`core/vault_format.py`): `_derive_pin_key` retornava `bytes` (imutável). O `pin_key` derivado do PIN do usuário ficava na heap até o GC sem possibilidade de zeragem. Corrigido: `_derive_pin_key` agora retorna `bytearray`. Blocos `try/finally` em `build_vaultkey_file` e `parse_vaultkey_file` zeram o `pin_key` após uso.
+
+### Informacional
+
+- **[T-01] `machine_secret` é raiz de confiança dupla** (THREAT_MODEL.md, SECURITY.md): documentado explicitamente que o mesmo `machine_secret` é usado tanto para o `machine_tag` no .vault quanto para o HMAC do metadata anti-rollback. Quem possui o `machine_secret` pode forjar ambos. Isso é uma limitação aceita de design (portabilidade sem dependência de keychain do SO), agora documentada explicitamente nas seções de limitações.
+
+### Ataques investigados e descartados
+
+- **Cross-vault blob substitution**: substituição cruzada de `vault_blob` ou `master_key_blob` entre cofres com salts diferentes é bloqueada pelo GCM authentication tag (chaves distintas). Confirmado por PoC.
+- **Rollback via vault mais novo + metadata mais antigo**: `vault_ts > meta_min` atualiza o metadata silenciosamente (comportamento correto). Não é ataque, é operação normal.
+- **Old vaultkey + new vault após rekey**: bloqueado corretamente — o mnemônico antigo não decifra o `master_key_blob` novo. Confirmado por PoC.
+- **Substituição de vault_blob entre cofres com mesmo salt**: matematicamente impossível (salt é gerado com `os.urandom`, probabilidade de colisão desprezível).
+
+---
+
+## [2.4.3] — junho 2026
+
+Versão de segurança — corrige achados da auditoria externa de segurança completa (junho/2026).
+
+### Segurança
+
+- **[A-01] GUI: `_del_entry` e `_on_added` usavam `save_vault()` em vez de `save_vault_with_key()`** (`gui.py`): ao deletar ou adicionar entradas pela `VaultScreen`, o código chamava `save_vault(contents, self.passphrase, ...)`, que re-executa Argon2id (256 MB) desnecessariamente — ~1s de latência extra por operação — e mantém a `str` passphrase ativa por mais tempo no caminho crítico. Ambas as chamadas substituídas por `save_vault_with_key(contents, self.kdf_key, ...)`, eliminando a re-derivação e reduzindo a exposição da passphrase.
+
+- **[A-02] `_FilesView._save()` usava `save_vault()` em vez de `save_vault_with_key()`** (`gui.py`): o mesmo problema de A-01 afetava o módulo de arquivos cifrados. O `kdf_key` já está disponível via `self._vs.kdf_key`. Corrigido.
+
+- **[A-03] `RekeyDlg` sem confirmação de PIN** (`gui.py`): o diálogo de rotação de credenciais permitia que o usuário definisse o PIN do novo `.vaultkey` em campo único sem confirmação — um typo silencioso tornaria o arquivo inacessível. Adicionado campo "Confirmar PIN do .vaultkey" com validação antes de prosseguir.
+
+- **[A-04] `parse_vaultkey_file` mensagem genérica para formato v1** (`core/vault_format.py`): arquivos `.vaultkey` versão 1 resultavam em erro genérico sem orientação. Adicionada mensagem específica explicando o formato legado e orientando uso do mnemônico de 24 palavras.
+
+- **[A-05] Machine binding bypassável por remoção do campo `machine_tag`** (`core/vault.py`): a verificação de vínculo só ocorre quando `machine_tag` está presente. Um adversário com acesso ao JSON pode remover o campo e abrir o cofre em qualquer máquina. Comportamento documentado como limitação aceita no THREAT_MODEL, mas o código não alertava o usuário. Adicionado `warnings.warn()` quando o campo está ausente, orientando uso do `rebind`.
+
+### Informacional
+
+- **[A-06] Machine binding: limitação de bypass documentada explicitamente** (THREAT_MODEL.md): adversário com `.vault` + passphrase pode remover `machine_tag` e contornar o vínculo de máquina. A proteção é contra acesso *sem* a passphrase, não contra adversário que já possui as credenciais.
 
 ---
 

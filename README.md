@@ -2,7 +2,7 @@
 
 **Cofre de senhas local com criptografia forte — Argon2id + AES-256-GCM + X25519**
 
-Versão: `2.4.2` | Python ≥ 3.10 | Linux / macOS
+Versão: `2.4.6` | Python ≥ 3.10 | Linux / macOS
 
 ---
 
@@ -118,12 +118,12 @@ key_lock/
 ├── cli.py                  # Ponto de entrada CLI (wrapper)
 ├── gui.py                  # Interface gráfica (Tkinter)
 ├── requirements.txt
-├── test_v231.py            # Suíte de regressão (65 testes)
+├── test_v231.py            # Suíte de regressão (141 testes)
 ├── CHANGELOG.md
 ├── SECURITY.md
 ├── THREAT_MODEL.md
 └── core/
-    ├── __init__.py         # Versão do pacote (2.4.2)
+    ├── __init__.py         # Versão do pacote (2.4.6)
     ├── crypto.py           # Primitivas: Argon2id, AES-GCM, X25519, HKDF
     ├── vault.py            # Lógica principal do cofre
     ├── vault_format.py     # Formato do arquivo .vaultkey
@@ -190,7 +190,7 @@ Separação de domínio por AAD em todos os blobs:
 python test_v231.py
 ```
 
-65 testes cobrindo: todos os 12 achados da auditoria de segurança (v2.4.2), regressões de bugs (BUG-01 a BUG-08), controles criptográficos (S-01 a S-03), controles de operação (C-01 a C-05) e feature F-01.
+141 testes cobrindo: todos os 12 achados da auditoria de segurança (v2.4.2), regressões de bugs (BUG-01 a BUG-08), controles criptográficos (S-01 a S-03), controles de operação (C-01 a C-05), achados das auditorias v2.4.3 (A-01 a A-06), v2.4.4 (B-01 a B-06) e v2.4.6 (N-01 a N-11).
 
 ---
 

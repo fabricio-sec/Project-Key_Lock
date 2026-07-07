@@ -8,7 +8,7 @@ import hmac
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.vault_format import MIN_PIN_LENGTH
+from core.vault_format import MIN_PIN_LENGTH, write_vaultkey_file
 
 def _open_url(url: str) -> None:
     try:
@@ -232,6 +232,38 @@ def strength_bar(parent, bits=0, bg_parent=None):
 
     return frame, update
 
+def _bind_strength_meter(owner, var, update_fn, warn_lbl):
+    """Liga um StringVar (passphrase ou PIN) a uma barra de força + label de
+    avisos, com proteção contra o widget já ter sido destruído quando o
+    trace dispara (ex: durante troca de tela).
+
+    [N-04] Antes desta correção, cada tela duplicava esta lógica com o ramo
+    de valor vazio (`if not val: ...`) FORA do try/except, causando um
+    TclError não tratado ("Exception in Tkinter callback") sempre que o
+    StringVar recebia um novo valor depois que a tela já tinha sido
+    destruída — reproduzido no fluxo de recuperação por 24 palavras.
+    Centralizar aqui também permite ligar o medidor de força ao PIN do
+    .vaultkey nas telas de recuperação/rekey (N-09), que antes só existia
+    na tela de criação de cofre.
+    """
+    def _on_change(*_):
+        if not owner.winfo_exists():
+            return
+        try:
+            val = var.get()
+            if not val:
+                update_fn(0, "")
+                warn_lbl.config(text="")
+                return
+            from core.crypto import estimate_passphrase_entropy
+            r = estimate_passphrase_entropy(val)
+            update_fn(r["bits"], f"{r['bits']} bits — {r['strength']}")
+            warn_lbl.config(text="\n".join(r["warnings"]) if r["warnings"] else "")
+        except Exception:
+            pass
+    var.trace_add("write", _on_change)
+    return _on_change
+
 class LoadingDlg(tk.Toplevel):
     def __init__(self, parent, msg="Processando..."):
         super().__init__(parent)
@@ -379,11 +411,32 @@ class WelcomeScreen(Screen):
 
         tk.Label(center,
                  text="100% local · sem telemetria · sem rede",
-                 bg=C["bg"], fg=C["text3"], font=FT["label"]).pack(pady=(18, 2))
+                 bg=C["bg"], fg=C["text3"], font=FT["label"]).pack(pady=(18, 4))
+
+        # Link GitHub com ícone
+        gh_frame = tk.Frame(center, bg=C["bg"], cursor="hand2")
+        gh_frame.pack(pady=(0, 4))
+        gh_icon = tk.Label(gh_frame, text="⌥", bg=C["bg"],
+                           fg=C["text3"], font=(_FONT_BODY, 11),
+                           cursor="hand2")
+        gh_icon.pack(side="left", padx=(0, 4))
+        gh_lbl = tk.Label(gh_frame,
+                          text="github.com/fabricio-sec/Project-Key_Lock",
+                          bg=C["bg"], fg=C["text3"],
+                          font=(_FONT_BODY, 9), cursor="hand2")
+        gh_lbl.pack(side="left")
+        _gh_url = "https://github.com/fabricio-sec/Project-Key_Lock"
+        for w in (gh_frame, gh_icon, gh_lbl):
+            w.bind("<Enter>", lambda e: (gh_lbl.config(fg=C["neon"]),
+                                         gh_icon.config(fg=C["neon"])))
+            w.bind("<Leave>", lambda e: (gh_lbl.config(fg=C["text3"]),
+                                         gh_icon.config(fg=C["text3"])))
+            w.bind("<Button-1>", lambda e: _open_url(_gh_url))
+
         try:
             from core import __version__
             tk.Label(center, text=f"v{__version__}", bg=C["bg"],
-                     fg=C["text3"], font=("Consolas", 8)).pack()
+                     fg=C["text3"], font=("Consolas", 8)).pack(pady=(2, 0))
         except Exception:
             pass
 
@@ -437,7 +490,6 @@ class CreateScreen(Screen):
         self._section_label(inner, "PASSPHRASE PRINCIPAL",
                             "Protege o cofre. Use frase com 4+ palavras.")
         self.pp_v = tk.StringVar()
-        self.pp_v.trace_add("write", self._on_pp_change)
         pf, _ = PasswordField(inner, self.pp_v, C["bg"])
         pf.pack(padx=28, fill="x", pady=(4, 2))
         sf, self._pp_str = strength_bar(inner, 0, C["bg"])
@@ -445,6 +497,7 @@ class CreateScreen(Screen):
         self.pp_warn = tk.Label(inner, text="", bg=C["bg"],
                                 fg=C["yellow"], font=FT["small"])
         self.pp_warn.pack(padx=28, anchor="w")
+        _bind_strength_meter(self, self.pp_v, self._pp_str, self.pp_warn)
 
         tk.Label(inner, text="Confirmar passphrase",
                  bg=C["bg"], fg=C["text2"], font=FT["small"]).pack(
@@ -456,7 +509,6 @@ class CreateScreen(Screen):
         self._section_label(inner, "PIN DE PROTEÇÃO DO .vaultkey",
                             "Protege o arquivo de recuperação. Pode ser diferente da passphrase.")
         self.pin_v = tk.StringVar()
-        self.pin_v.trace_add("write", self._on_pin_change)
         pf3, _ = PasswordField(inner, self.pin_v, C["bg"])
         pf3.pack(padx=28, fill="x", pady=(4, 2))
         sf2, self._pin_str = strength_bar(inner, 0, C["bg"])
@@ -464,6 +516,7 @@ class CreateScreen(Screen):
         self.pin_warn = tk.Label(inner, text="", bg=C["bg"],
                                  fg=C["yellow"], font=FT["small"])
         self.pin_warn.pack(padx=28, anchor="w")
+        _bind_strength_meter(self, self.pin_v, self._pin_str, self.pin_warn)
 
         tk.Label(inner, text="Confirmar PIN",
                  bg=C["bg"], fg=C["text2"], font=FT["small"]).pack(
@@ -482,23 +535,6 @@ class CreateScreen(Screen):
             initialfile="meu_cofre.vault")
         if p:
             self.path_v.set(p)
-
-    def _on_pp_change(self, *_):
-        self._update_strength(self.pp_v.get(), self._pp_str, self.pp_warn)
-
-    def _on_pin_change(self, *_):
-        self._update_strength(self.pin_v.get(), self._pin_str, self.pin_warn)
-
-    def _update_strength(self, val, fn, warn_lbl):
-        if not val:
-            fn(0, ""); warn_lbl.config(text=""); return
-        try:
-            from core.crypto import estimate_passphrase_entropy
-            r = estimate_passphrase_entropy(val)
-            fn(r["bits"], f"{r['bits']} bits — {r['strength']}")
-            warn_lbl.config(text="\n".join(r["warnings"]) if r["warnings"] else "")
-        except Exception:
-            pass
 
     def _create(self):
         path = self.path_v.get().strip()
@@ -544,8 +580,7 @@ class CreateScreen(Screen):
                 from core.vault import create_vault
                 mnemonic, vaultkey_content = create_vault(pp, path, pin)
                 vaultkey_path = path.replace(".vault", ".vaultkey")
-                with open(vaultkey_path, "w") as f:
-                    f.write(vaultkey_content)
+                write_vaultkey_file(vaultkey_path, vaultkey_content)
                 self.app.root.after(0, lambda: self._done(path, vaultkey_path, mnemonic, pp, ld))
             except Exception as ex:
                 self.app.root.after(0, lambda: (ld.close(),
@@ -727,7 +762,6 @@ class RecoverFileScreen(Screen):
         self._section_label(inner, "NOVA PASSPHRASE PARA O COFRE")
 
         self.new_pp_v = tk.StringVar()
-        self.new_pp_v.trace_add("write", self._on_pp)
         pf2, _ = PasswordField(inner, self.new_pp_v, C["bg"])
         pf2.pack(padx=28, fill="x", pady=(4, 2))
         sf, self._str_fn = strength_bar(inner, 0, C["bg"])
@@ -735,6 +769,7 @@ class RecoverFileScreen(Screen):
         self.warn_lbl = tk.Label(inner, text="", bg=C["bg"],
                                  fg=C["yellow"], font=FT["small"])
         self.warn_lbl.pack(padx=28, anchor="w", pady=(0, 8))
+        _bind_strength_meter(self, self.new_pp_v, self._str_fn, self.warn_lbl)
 
         tk.Label(inner, text="Confirmar nova passphrase",
                  bg=C["bg"], fg=C["text2"], font=FT["small"]).pack(
@@ -749,7 +784,13 @@ class RecoverFileScreen(Screen):
                             "pode ter sido comprometido.")
         self.new_pin_v = tk.StringVar()
         pf4, _ = PasswordField(inner, self.new_pin_v, C["bg"])
-        pf4.pack(padx=28, fill="x", pady=(4, 12))
+        pf4.pack(padx=28, fill="x", pady=(4, 2))
+        sf_pin, self._pin_str_fn = strength_bar(inner, 0, C["bg"])
+        sf_pin.pack(padx=28, fill="x")
+        self.pin_warn_lbl = tk.Label(inner, text="", bg=C["bg"],
+                                     fg=C["yellow"], font=FT["small"])
+        self.pin_warn_lbl.pack(padx=28, anchor="w", pady=(0, 8))
+        _bind_strength_meter(self, self.new_pin_v, self._pin_str_fn, self.pin_warn_lbl)
 
         tk.Label(inner, text="Confirmar novo PIN",
                  bg=C["bg"], fg=C["text2"], font=FT["small"]).pack(
@@ -760,18 +801,6 @@ class RecoverFileScreen(Screen):
 
         Btn(inner, "  Recuperar e redefinir passphrase  ",
             self._recover).pack(padx=28, fill="x", pady=(0, 36))
-
-    def _on_pp(self, *_):
-        v = self.new_pp_v.get()
-        if not v:
-            self._str_fn(0, ""); self.warn_lbl.config(text=""); return
-        try:
-            from core.crypto import estimate_passphrase_entropy
-            r = estimate_passphrase_entropy(v)
-            self._str_fn(r["bits"], f"{r['bits']} bits — {r['strength']}")
-            self.warn_lbl.config(text="\n".join(r["warnings"]) if r["warnings"] else "")
-        except Exception:
-            pass
 
     def _recover(self):
         vault_p  = self.vault_v.get().strip()
@@ -815,7 +844,7 @@ class RecoverFileScreen(Screen):
                 from core.crypto import secure_zero
                 secure_zero(old_kdf)
 
-                _, new_vaultkey = rotate_master_key(
+                new_mnemonic, new_vaultkey = rotate_master_key(
                     old_passphrase=None,
                     new_passphrase=new_pp,
                     vault_path=vault_p,
@@ -824,13 +853,20 @@ class RecoverFileScreen(Screen):
                 )
 
                 vaultkey_path = vault_p.replace(".vault", ".vaultkey")
-                with open(vaultkey_path, "w") as f:
-                    f.write(new_vaultkey)
+                write_vaultkey_file(vaultkey_path, new_vaultkey)
 
                 from core.vault import open_vault_with_passphrase
                 contents2, kdf_key = open_vault_with_passphrase(new_pp, vault_p)
-                self.app.root.after(0, lambda: (ld.close(),
-                    self.app.enter_vault(vault_p, new_pp, contents2, kdf_key)))
+
+                def _done():
+                    ld.close()
+                    # [N-02] Exibe o NOVO mnemônico gerado pela rotação — antes
+                    # esse valor era descartado (`_, new_vaultkey = ...`) e o
+                    # usuário terminava a recuperação sem nunca ver/anotar as
+                    # novas 24 palavras, mesmo com tudo dando certo.
+                    MnemonicDlg(self.app.root, new_mnemonic, vaultkey_path)
+                    self.app.enter_vault(vault_p, new_pp, contents2, kdf_key)
+                self.app.root.after(0, _done)
             except ValueError as ex:
                 msg = str(ex)
                 self.app.root.after(0, lambda: (ld.close(),
@@ -910,7 +946,6 @@ class RecoverWordsScreen(Screen):
         self._section_label(inner, "NOVA PASSPHRASE PARA O COFRE")
 
         self.new_pp_v = tk.StringVar()
-        self.new_pp_v.trace_add("write", self._on_pp)
         pf, _ = PasswordField(inner, self.new_pp_v, C["bg"])
         pf.pack(padx=28, fill="x", pady=(4, 2))
         sf, self._str_fn = strength_bar(inner, 0, C["bg"])
@@ -918,6 +953,7 @@ class RecoverWordsScreen(Screen):
         self.warn_lbl = tk.Label(inner, text="", bg=C["bg"],
                                  fg=C["yellow"], font=FT["small"])
         self.warn_lbl.pack(padx=28, anchor="w", pady=(0, 8))
+        _bind_strength_meter(self, self.new_pp_v, self._str_fn, self.warn_lbl)
 
         tk.Label(inner, text="Confirmar nova passphrase",
                  bg=C["bg"], fg=C["text2"], font=FT["small"]).pack(
@@ -931,7 +967,13 @@ class RecoverWordsScreen(Screen):
                             "Recomendado: diferente da passphrase principal.")
         self.new_pin_v = tk.StringVar()
         pf3, _ = PasswordField(inner, self.new_pin_v, C["bg"])
-        pf3.pack(padx=28, fill="x", pady=(4, 12))
+        pf3.pack(padx=28, fill="x", pady=(4, 2))
+        sf_pin, self._pin_str_fn = strength_bar(inner, 0, C["bg"])
+        sf_pin.pack(padx=28, fill="x")
+        self.pin_warn_lbl = tk.Label(inner, text="", bg=C["bg"],
+                                     fg=C["yellow"], font=FT["small"])
+        self.pin_warn_lbl.pack(padx=28, anchor="w", pady=(0, 8))
+        _bind_strength_meter(self, self.new_pin_v, self._pin_str_fn, self.pin_warn_lbl)
 
         tk.Label(inner, text="Confirmar novo PIN",
                  bg=C["bg"], fg=C["text2"], font=FT["small"]).pack(
@@ -947,18 +989,6 @@ class RecoverWordsScreen(Screen):
         try:
             self._word_entries[idx + 1].focus_set()
         except IndexError:
-            pass
-
-    def _on_pp(self, *_):
-        v = self.new_pp_v.get()
-        if not v:
-            self._str_fn(0, ""); self.warn_lbl.config(text=""); return
-        try:
-            from core.crypto import estimate_passphrase_entropy
-            r = estimate_passphrase_entropy(v)
-            self._str_fn(r["bits"], f"{r['bits']} bits — {r['strength']}")
-            self.warn_lbl.config(text="\n".join(r["warnings"]) if r["warnings"] else "")
-        except Exception:
             pass
 
     def _recover(self):
@@ -1020,7 +1050,7 @@ class RecoverWordsScreen(Screen):
                 contents, old_kdf = open_vault_with_mnemonic(phrase, vault_p)
                 secure_zero(old_kdf)
 
-                _, new_vaultkey = rotate_master_key(
+                new_mnemonic, new_vaultkey = rotate_master_key(
                     old_passphrase=None,
                     new_passphrase=new_pp,
                     vault_path=vault_p,
@@ -1028,13 +1058,20 @@ class RecoverWordsScreen(Screen):
                     contents=contents,
                 )
                 vaultkey_path = vault_p.replace(".vault", ".vaultkey")
-                with open(vaultkey_path, "w") as f:
-                    f.write(new_vaultkey)
+                write_vaultkey_file(vaultkey_path, new_vaultkey)
 
                 from core.vault import open_vault_with_passphrase
                 contents2, kdf_key = open_vault_with_passphrase(new_pp, vault_p)
-                self.app.root.after(0, lambda: (ld.close(),
-                    self.app.enter_vault(vault_p, new_pp, contents2, kdf_key)))
+
+                def _done():
+                    ld.close()
+                    # [N-02] Exibe o NOVO mnemônico gerado pela rotação — antes
+                    # esse valor era descartado (`_, new_vaultkey = ...`) e o
+                    # usuário terminava a recuperação sem nunca ver/anotar as
+                    # novas 24 palavras, mesmo com tudo dando certo.
+                    MnemonicDlg(self.app.root, new_mnemonic, vaultkey_path)
+                    self.app.enter_vault(vault_p, new_pp, contents2, kdf_key)
+                self.app.root.after(0, _done)
             except Exception:
 
                 self.app.root.after(0, lambda: (ld.close(),
@@ -1056,15 +1093,15 @@ class RecoverWordsScreen(Screen):
             return []
 
 class VaultScreen(tk.Frame):
-    def __init__(self, parent, app, contents, passphrase, vault_path, kdf_key=None):
+    def __init__(self, parent, app, contents, vault_path, kdf_key=None):
         super().__init__(parent, bg=C["bg"])
         self.app        = app
         self.contents   = contents
-        self.passphrase = passphrase
         self.vault_path = vault_path
 
         self.kdf_key    = kdf_key
         self._search_active = False
+        self._active_files_view = None
 
         self._IDLE_SECONDS = 600
         self._idle_timer   = None
@@ -1096,13 +1133,26 @@ class VaultScreen(tk.Frame):
         if self.kdf_key is not None:
             secure_zero(self.kdf_key)
             self.kdf_key = None
-        self.passphrase = ""
         self.contents   = {}
+
+    def _unbind_activity(self):
+        # [N-06] bind_all registra o callback na janela raiz do Tk, não no
+        # widget desta instância. Sem desfazer explicitamente, cada ciclo de
+        # abrir/fechar cofre (incluindo auto-lock por inatividade) deixava
+        # dois handlers "zumbis" acumulados permanentemente no root, cada um
+        # referenciando uma VaultScreen já destruída. Chamado tanto em
+        # _close() (fechamento manual) quanto em _auto_lock() (inatividade).
+        try:
+            self.unbind_all("<Any-KeyPress>")
+            self.unbind_all("<Any-Button>")
+        except Exception:
+            pass
 
     def _auto_lock(self):
 
         if getattr(self.app, "_current", None) is not self:
             return
+        self._unbind_activity()
         self._wipe_secrets()
         try:
             self.app.show_home()
@@ -1141,11 +1191,10 @@ class VaultScreen(tk.Frame):
 
         Sep(sb, C["border"]).pack(fill="x", padx=12, pady=(0, 12))
 
-        self._nav_senhas  = self._sb_nav(sb, "🔑  Senhas",           self._show_entries)
-        self._nav_files   = self._sb_nav(sb, "📁  Arquivos",          self._show_files)
-        Sep(sb, C["border"]).pack(fill="x", padx=12, pady=8)
-        self._sb_btn(sb, "⊞ Gerar senha",        self._open_genpass)
-        self._sb_btn(sb, "↻ Rotacionar chaves",   self._do_rekey)
+        self._nav_senhas  = self._sb_nav(sb, "🔑  Senhas",            self._show_entries)
+        self._nav_files   = self._sb_nav(sb, "📁  Arquivos",           self._show_files)
+        self._nav_genpass = self._sb_nav(sb, "⊞  Gerar senha",        self._show_genpass)
+        self._nav_rekey   = self._sb_nav(sb, "↻  Rotacionar chaves",  self._show_rekey)
         Sep(sb, C["border"]).pack(fill="x", padx=12, pady=8)
         self._sb_btn(sb, "× Fechar cofre",        self._close)
 
@@ -1165,6 +1214,13 @@ class VaultScreen(tk.Frame):
             bg=C["accent3"], fg=C["neon"],
             font=FT["label"], padx=8, pady=3)
         self._count_lbl.pack(side="left", padx=(10, 0))
+
+        # Contador de arquivos (exibido na topbar quando aba Arquivos está ativa)
+        self._files_count_lbl = tk.Label(
+            topbar, text="0",
+            bg=C["accent3"], fg=C["neon"],
+            font=FT["label"], padx=8, pady=3)
+        # Não empacotado aqui — empacotado em _show_files
 
         self._add_row = tk.Frame(main, bg=C["bg"])
         self._add_row.pack(fill="x", padx=24, pady=(0, 8))
@@ -1228,7 +1284,9 @@ class VaultScreen(tk.Frame):
         self._list_frame.bind("<MouseWheel>",
             lambda e: self._canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
-        self._files_frame = tk.Frame(main, bg=C["bg"])
+        self._files_frame  = tk.Frame(main, bg=C["bg"])
+        self._genpass_frame = tk.Frame(main, bg=C["bg"])
+        self._rekey_frame   = tk.Frame(main, bg=C["bg"])
 
         self._main_frame = lf
 
@@ -1403,15 +1461,22 @@ class VaultScreen(tk.Frame):
             except Exception:
                 pass
 
-    def _show_entries(self):
-        self._set_nav_active(self._nav_senhas)
-        if self._files_frame.winfo_ismapped():
-            self._files_frame.pack_forget()
-
+    def _hide_all_panels(self):
+        """Oculta todos os painéis de conteúdo e controles contextuais."""
+        for f in (self._files_frame, self._genpass_frame, self._rekey_frame):
+            if f.winfo_ismapped():
+                f.pack_forget()
+            for w in f.winfo_children():
+                w.destroy()
+        self._files_count_lbl.pack_forget()
         self._add_row.pack_forget()
         self._search_row.pack_forget()
         self._main_frame.pack_forget()
+        self._active_files_view = None
 
+    def _show_entries(self):
+        self._set_nav_active(self._nav_senhas)
+        self._hide_all_panels()
         self._topbar_title.config(text="Senhas")
         self._count_lbl.pack(side="left", padx=(10, 0))
         self._add_row.pack(fill="x", padx=24, pady=(0, 8))
@@ -1421,17 +1486,18 @@ class VaultScreen(tk.Frame):
 
     def _show_files(self):
         self._set_nav_active(self._nav_files)
-        if self._main_frame.winfo_ismapped():
-            self._main_frame.pack_forget()
-        self._add_row.pack_forget()
-        self._search_row.pack_forget()
+        self._hide_all_panels()
         self._count_lbl.pack_forget()
         self._topbar_title.config(text="Arquivos")
 
-        for w in self._files_frame.winfo_children():
-            w.destroy()
-        self._files_frame.pack(fill="both", expand=True, padx=24, pady=(0, 16))
-        _FilesView(self._files_frame, self).pack(fill="both", expand=True)
+        n_files = len(self.contents.get("files", []))
+        self._files_count_lbl.config(text=str(n_files))
+        self._files_count_lbl.pack(side="left", padx=(10, 0))
+
+        self._files_frame.pack(fill="both", expand=True, padx=(24, 0), pady=(0, 16))
+        fv = _FilesView(self._files_frame, self)
+        fv.pack(fill="both", expand=True)
+        self._active_files_view = fv
 
     def _copy_pw(self, entry):
         _clipboard_copy(self, entry["password"],
@@ -1443,22 +1509,35 @@ class VaultScreen(tk.Frame):
     def _del_entry(self, entry):
         if messagebox.askyesno("Confirmar exclusão",
                                f"Deletar a entrada '{entry.get('name', '')}'?"):
-            from core.vault import delete_entry, save_vault
+            from core.vault import delete_entry, save_vault_with_key
             self.contents = delete_entry(self.contents, entry["id"])
-            save_vault(self.contents, self.passphrase, self.vault_path)
+            save_vault_with_key(self.contents, self.kdf_key, self.vault_path)
             self._refresh()
 
     def _add_entry(self):
         AddEntryDlg(self.app.root, self._on_added)
 
     def _on_added(self, name, user, pw, url):
-        from core.vault import add_entry, save_vault
+        from core.vault import add_entry, save_vault_with_key
         self.contents = add_entry(self.contents, name, user, pw, url)
-        save_vault(self.contents, self.passphrase, self.vault_path)
+        save_vault_with_key(self.contents, self.kdf_key, self.vault_path)
         self._refresh()
 
-    def _open_genpass(self):
-        GenpassDlg(self.app.root)
+    def _show_genpass(self):
+        self._set_nav_active(self._nav_genpass)
+        self._hide_all_panels()
+        self._count_lbl.pack_forget()
+        self._topbar_title.config(text="Gerar senha")
+        self._genpass_frame.pack(fill="both", expand=True, padx=24, pady=(0, 16))
+        _InlineGenpass(self._genpass_frame).pack(fill="both", expand=True)
+
+    def _show_rekey(self):
+        self._set_nav_active(self._nav_rekey)
+        self._hide_all_panels()
+        self._count_lbl.pack_forget()
+        self._topbar_title.config(text="Rotacionar chaves")
+        self._rekey_frame.pack(fill="both", expand=True, padx=24, pady=(0, 16))
+        _InlineRekey(self._rekey_frame, self).pack(fill="both", expand=True)
 
     def _close(self):
 
@@ -1468,14 +1547,246 @@ class VaultScreen(tk.Frame):
             except Exception:
                 pass
             self._idle_timer = None
+        self._unbind_activity()
         self._wipe_secrets()
         self.app.show_welcome()
 
-    def _do_rekey(self):
-        RekeyDlg(self.app.root, self)
 
-    def _placeholder_rekey(self):
-        self._do_rekey()
+
+class _InlineGenpass(tk.Frame):
+    """Gerador de senhas inline — exibido dentro do painel principal do VaultScreen."""
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=C["bg"])
+        self._build()
+
+    def _build(self):
+        inner = tk.Frame(self, bg=C["bg"])
+        inner.pack(fill="x", pady=(8, 0))
+
+        sr = tk.Frame(inner, bg=C["bg"])
+        sr.pack(fill="x", pady=(0, 14))
+        tk.Label(sr, text="Tamanho:", bg=C["bg"],
+                 fg=C["text2"], font=FT["body"]).pack(side="left")
+        self._len_v = tk.IntVar(value=20)
+        self._len_v.trace_add("write", lambda *_: self._regen())
+        slider = tk.Scale(sr, variable=self._len_v, from_=8, to=64,
+                          orient="horizontal",
+                          bg=C["bg"], fg=C["text"],
+                          troughcolor=C["surface2"],
+                          highlightthickness=0, sliderrelief="flat",
+                          activebackground=C["neon"],
+                          length=320, showvalue=False)
+        slider.pack(side="left", padx=(10, 8))
+        self._len_lbl = tk.Label(sr, text="20", bg=C["bg"],
+                                  fg=C["neon"], font=FT["h3"], width=3)
+        self._len_lbl.pack(side="left")
+
+        opt_r = tk.Frame(inner, bg=C["bg"])
+        opt_r.pack(fill="x", pady=(0, 16))
+        self._upper_v   = tk.BooleanVar(value=True)
+        self._digits_v  = tk.BooleanVar(value=True)
+        self._symbols_v = tk.BooleanVar(value=True)
+        for txt, var in [("Maiúsculas (A-Z)", self._upper_v),
+                         ("Números (0-9)",    self._digits_v),
+                         ("Símbolos (!@#)",   self._symbols_v)]:
+            tk.Checkbutton(opt_r, text=txt, variable=var,
+                           bg=C["bg"], fg=C["text2"],
+                           selectcolor=C["surface2"],
+                           activebackground=C["bg"],
+                           activeforeground=C["text"],
+                           font=FT["small"],
+                           command=self._regen).pack(side="left", padx=(0, 18))
+
+        res_outer = tk.Frame(inner, bg=C["border"])
+        res_outer.pack(fill="x", pady=(0, 6))
+        res_f = tk.Frame(res_outer, bg=C["surface2"])
+        res_f.pack(fill="x", padx=1, pady=1)
+        self._pw_v = tk.StringVar()
+        tk.Label(res_f, textvariable=self._pw_v,
+                 bg=C["surface2"], fg=C["neon"],
+                 font=(_FONT_MONO, 16, "bold"),
+                 padx=18, pady=20, anchor="center").pack(fill="x", expand=True)
+
+        self._ent_lbl = tk.Label(inner, text="", bg=C["bg"],
+                                  fg=C["text3"], font=FT["small"])
+        self._ent_lbl.pack(anchor="w", pady=(4, 16))
+
+        btn_r = tk.Frame(inner, bg=C["bg"])
+        btn_r.pack(fill="x")
+        Btn(btn_r, "  Gerar nova senha  ", self._regen).pack(side="left")
+        Btn(btn_r, "  Copiar  ", self._copy, kind="ghost").pack(side="left", padx=(10, 0))
+
+        self._regen()
+
+    def _regen(self, *_):
+        try:
+            length = self._len_v.get()
+            self._len_lbl.config(text=str(length))
+            from core.crypto import generate_password, estimate_passphrase_entropy
+            pw = generate_password(
+                length=length,
+                use_upper=self._upper_v.get(),
+                use_digits=self._digits_v.get(),
+                use_symbols=self._symbols_v.get(),
+            )
+            self._pw_v.set(pw)
+            r = estimate_passphrase_entropy(pw, machine_generated=True)
+            self._ent_lbl.config(text=f"Entropia: {r['bits']} bits — {r['strength']}")
+        except Exception as ex:
+            print(f"[key_lock] _InlineGenpass._regen: {ex}", file=sys.stderr)
+            self._pw_v.set("— erro —")
+
+    def _copy(self):
+        pw = self._pw_v.get()
+        if pw and pw != "— erro —":
+            _clipboard_copy(self, pw, label="Senha gerada")
+
+
+class _InlineRekey(tk.Frame):
+    """Rotacionador de chaves inline — exibido dentro do painel principal do VaultScreen."""
+
+    def __init__(self, parent, vault_screen: "VaultScreen"):
+        super().__init__(parent, bg=C["bg"])
+        self._vs = vault_screen
+        self._build()
+
+    def _build(self):
+        tk.Label(self,
+                 text="Gera nova passphrase, novo salt Argon2id e novo mnemônico de recuperação.\n"
+                      "Cópias antigas do cofre ficam inutilizáveis após esta operação.",
+                 bg=C["bg"], fg=C["text3"], font=FT["small"],
+                 justify="left", wraplength=560).pack(anchor="w", pady=(4, 16))
+
+        Sep(self, C["border"]).pack(fill="x", pady=(0, 16))
+
+        inner = tk.Frame(self, bg=C["bg"])
+        inner.pack(fill="x")
+
+        def _lbl(t):
+            tk.Label(inner, text=t, bg=C["bg"], fg=C["text2"],
+                     font=FT["small"]).pack(anchor="w", pady=(0, 4))
+
+        _lbl("Passphrase atual (para confirmar identidade)")
+        self._old_pp_v = tk.StringVar()
+        pf0, _ = PasswordField(inner, self._old_pp_v, C["bg"])
+        pf0.pack(fill="x", pady=(0, 12))
+
+        _lbl("Nova passphrase")
+        self._new_pp_v = tk.StringVar()
+        pf1, _ = PasswordField(inner, self._new_pp_v, C["bg"])
+        pf1.pack(fill="x", pady=(0, 2))
+        sf, self._str_fn = strength_bar(inner, 0, C["bg"])
+        sf.pack(fill="x")
+        self._warn_lbl = tk.Label(inner, text="", bg=C["bg"],
+                                   fg=C["yellow"], font=FT["small"])
+        self._warn_lbl.pack(anchor="w", pady=(0, 8))
+        _bind_strength_meter(self, self._new_pp_v, self._str_fn, self._warn_lbl)
+
+        _lbl("Confirmar nova passphrase")
+        self._new_pp2_v = tk.StringVar()
+        pf2, _ = PasswordField(inner, self._new_pp2_v, C["bg"])
+        pf2.pack(fill="x", pady=(0, 12))
+
+        _lbl("PIN para o novo arquivo .vaultkey")
+        self._pin_v = tk.StringVar()
+        pf3, _ = PasswordField(inner, self._pin_v, C["bg"])
+        pf3.pack(fill="x", pady=(0, 2))
+        sf_pin, self._pin_str_fn = strength_bar(inner, 0, C["bg"])
+        sf_pin.pack(fill="x")
+        self._pin_warn_lbl = tk.Label(inner, text="", bg=C["bg"],
+                                       fg=C["yellow"], font=FT["small"])
+        self._pin_warn_lbl.pack(anchor="w", pady=(0, 8))
+        _bind_strength_meter(self, self._pin_v, self._pin_str_fn, self._pin_warn_lbl)
+
+        _lbl("Confirmar PIN do .vaultkey")
+        self._pin2_v = tk.StringVar()
+        pf4, _ = PasswordField(inner, self._pin2_v, C["bg"])
+        pf4.pack(fill="x", pady=(0, 20))
+
+        Sep(self, C["border"]).pack(fill="x", pady=(0, 16))
+        Btn(self, "  Rotacionar agora  ", self._do).pack(anchor="w")
+
+    def _do(self):
+        old_pp  = self._old_pp_v.get()
+        new_pp  = self._new_pp_v.get()
+        new_pp2 = self._new_pp2_v.get()
+        pin     = self._pin_v.get()
+        pin2    = self._pin2_v.get()
+
+        if not old_pp:
+            messagebox.showerror("Erro", "Digite a passphrase atual."); return
+        if not new_pp:
+            messagebox.showerror("Erro", "Digite a nova passphrase."); return
+        if new_pp != new_pp2:
+            messagebox.showerror("Erro", "Novas passphrases não coincidem."); return
+        if not pin:
+            messagebox.showerror("Erro", "O PIN do .vaultkey não pode ser vazio."); return
+        if len(pin) < MIN_PIN_LENGTH:
+            messagebox.showerror("PIN muito curto",
+                f"O PIN do arquivo de recuperação deve ter pelo menos {MIN_PIN_LENGTH} "
+                "caracteres.\nEsse PIN é a única proteção do arquivo .vaultkey caso ele "
+                "seja roubado.")
+            return
+        if pin != pin2:
+            messagebox.showerror("Erro", "Os PINs do .vaultkey não coincidem."); return
+
+        try:
+            from core.crypto import estimate_passphrase_entropy
+            r = estimate_passphrase_entropy(new_pp)
+            if r["bits"] < 40:
+                if not messagebox.askyesno("Passphrase fraca",
+                        f"Entropia: {r['bits']} bits. Continuar mesmo assim?"):
+                    return
+        except Exception:
+            pass
+
+        if not messagebox.askyesno("Confirmar rotação",
+                "Esta operação irá:\n\n"
+                "  • Alterar a passphrase do cofre\n"
+                "  • Gerar um novo arquivo .vaultkey\n"
+                "  • Invalidar a chave de recuperação antiga\n\n"
+                "Tem certeza que deseja continuar?"):
+            return
+
+        ld = LoadingDlg(self._vs.app.root, "Rotacionando credenciais  (Argon2id 256 MB)…")
+
+        def work():
+            try:
+                from core.vault import rotate_master_key, open_vault_with_passphrase
+                new_mnemonic, new_vaultkey_content = rotate_master_key(
+                    old_pp, new_pp, self._vs.vault_path, pin
+                )
+                vaultkey_path = self._vs.vault_path.replace(".vault", ".vaultkey")
+                write_vaultkey_file(vaultkey_path, new_vaultkey_content)
+
+                new_contents, new_kdf_key = open_vault_with_passphrase(
+                    new_pp, self._vs.vault_path
+                )
+
+                def _done():
+                    ld.close()
+                    from core.crypto import secure_zero
+                    if self._vs.kdf_key is not None:
+                        secure_zero(self._vs.kdf_key)
+                    self._vs.kdf_key  = new_kdf_key
+                    self._vs.contents = new_contents
+                    MnemonicDlg(self._vs.app.root, new_mnemonic, vaultkey_path)
+                    _toast(self._vs, "  Credenciais rotacionadas com sucesso  ", ms=3500)
+                    # Voltar para a aba de senhas após rotação bem-sucedida
+                    self._vs._show_entries()
+
+                self._vs.app.root.after(0, _done)
+            except ValueError as ex:
+                self._vs.app.root.after(0, lambda: (ld.close(),
+                    messagebox.showerror("Rotação falhou",
+                        f"Passphrase atual incorreta ou cofre corrompido.\n\n{ex}")))
+            except Exception as ex:
+                self._vs.app.root.after(0, lambda: (ld.close(),
+                    messagebox.showerror("Erro", str(ex))))
+
+        threading.Thread(target=work, daemon=True).start()
+
 
 class RekeyDlg(tk.Toplevel):
     def __init__(self, parent, vault_screen: "VaultScreen"):
@@ -1521,7 +1832,6 @@ class RekeyDlg(tk.Toplevel):
 
         _lbl("Nova passphrase")
         self._new_pp_v = tk.StringVar()
-        self._new_pp_v.trace_add("write", self._on_new_pp)
         pf1, _ = PasswordField(inner, self._new_pp_v, C["bg"])
         pf1.pack(fill="x", pady=(0, 2))
         sf, self._str_fn = strength_bar(inner, 0, C["bg"])
@@ -1529,6 +1839,7 @@ class RekeyDlg(tk.Toplevel):
         self._warn_lbl = tk.Label(inner, text="", bg=C["bg"],
                                    fg=C["yellow"], font=FT["small"])
         self._warn_lbl.pack(anchor="w", pady=(0, 8))
+        _bind_strength_meter(self, self._new_pp_v, self._str_fn, self._warn_lbl)
 
         _lbl("Confirmar nova passphrase")
         self._new_pp2_v = tk.StringVar()
@@ -1538,27 +1849,27 @@ class RekeyDlg(tk.Toplevel):
         _lbl("PIN para o novo arquivo .vaultkey")
         self._pin_v = tk.StringVar()
         pf3, _ = PasswordField(inner, self._pin_v, C["bg"])
-        pf3.pack(fill="x", pady=(0, 0))
+        pf3.pack(fill="x", pady=(0, 2))
+        sf_pin, self._pin_str_fn = strength_bar(inner, 0, C["bg"])
+        sf_pin.pack(fill="x")
+        self._pin_warn_lbl = tk.Label(inner, text="", bg=C["bg"],
+                                       fg=C["yellow"], font=FT["small"])
+        self._pin_warn_lbl.pack(anchor="w", pady=(0, 8))
+        _bind_strength_meter(self, self._pin_v, self._pin_str_fn, self._pin_warn_lbl)
+
+        _lbl("Confirmar PIN do .vaultkey")
+        self._pin2_v = tk.StringVar()
+        pf4, _ = PasswordField(inner, self._pin2_v, C["bg"])
+        pf4.pack(fill="x", pady=(0, 0))
 
         self.bind("<Escape>", lambda e: self.destroy())
-
-    def _on_new_pp(self, *_):
-        v = self._new_pp_v.get()
-        if not v:
-            self._str_fn(0, ""); self._warn_lbl.config(text=""); return
-        try:
-            from core.crypto import estimate_passphrase_entropy
-            r = estimate_passphrase_entropy(v)
-            self._str_fn(r["bits"], f"{r['bits']} bits — {r['strength']}")
-            self._warn_lbl.config(text="\n".join(r["warnings"]) if r["warnings"] else "")
-        except Exception:
-            pass
 
     def _do(self):
         old_pp  = self._old_pp_v.get()
         new_pp  = self._new_pp_v.get()
         new_pp2 = self._new_pp2_v.get()
         pin     = self._pin_v.get()
+        pin2    = self._pin2_v.get()
 
         if not old_pp:
             messagebox.showerror("Erro", "Digite a passphrase atual."); return
@@ -1574,6 +1885,8 @@ class RekeyDlg(tk.Toplevel):
                 "caracteres.\nEsse PIN é a única proteção do arquivo .vaultkey caso ele "
                 "seja roubado.")
             return
+        if pin != pin2:
+            messagebox.showerror("Erro", "Os PINs do .vaultkey não coincidem."); return
 
         try:
             from core.crypto import estimate_passphrase_entropy
@@ -1603,8 +1916,7 @@ class RekeyDlg(tk.Toplevel):
                     old_pp, new_pp, self._vs.vault_path, pin
                 )
                 vaultkey_path = self._vs.vault_path.replace(".vault", ".vaultkey")
-                with open(vaultkey_path, "w") as f:
-                    f.write(new_vaultkey_content)
+                write_vaultkey_file(vaultkey_path, new_vaultkey_content)
 
                 new_contents, new_kdf_key = open_vault_with_passphrase(
                     new_pp, self._vs.vault_path
@@ -1615,7 +1927,6 @@ class RekeyDlg(tk.Toplevel):
                     from core.crypto import secure_zero
                     if self._vs.kdf_key is not None:
                         secure_zero(self._vs.kdf_key)
-                    self._vs.passphrase = new_pp
                     self._vs.kdf_key    = new_kdf_key
                     self._vs.contents   = new_contents
                     MnemonicDlg(self._vs.app.root, new_mnemonic, vaultkey_path)
@@ -2203,12 +2514,12 @@ class _FilesView(tk.Frame):
     def _get_aes_key(self) -> "tuple[bytearray, bool]":
         if self._vs.kdf_key is not None:
             return self._vs.kdf_key, False
-        from core.crypto import derive_key_from_passphrase, b64_to_bytes
-        from core.vault import _load_vault_file
-        vault_data = _load_vault_file(self._vs.vault_path)
-        salt = b64_to_bytes(vault_data["salt"])
-        key, _ = derive_key_from_passphrase(self._vs.passphrase, salt)
-        return key, True
+        # kdf_key deve estar sempre disponível durante a sessão.
+        # A passphrase não é mais armazenada na VaultScreen (B-01 fix).
+        raise RuntimeError(
+            "kdf_key não disponível. O cofre pode ter sido bloqueado por inatividade. "
+            "Reabra o cofre para continuar."
+        )
 
     def _decrypt_blob(self, entry: dict) -> bytearray:
         import base64
@@ -2230,8 +2541,14 @@ class _FilesView(tk.Frame):
         return self._vs.contents.get("files", [])
 
     def _save(self):
-        from core.vault import save_vault
-        save_vault(self._vs.contents, self._vs.passphrase, self._vs.vault_path)
+        from core.vault import save_vault_with_key
+        save_vault_with_key(self._vs.contents, self._vs.kdf_key, self._vs.vault_path)
+        # Atualizar contador de arquivos na topbar
+        try:
+            n = len(self._vs.contents.get("files", []))
+            self._vs._files_count_lbl.config(text=str(n))
+        except Exception:
+            pass
 
     def _search_term(self) -> str:
         val = self._search_v.get()
@@ -2347,6 +2664,10 @@ class _FilesView(tk.Frame):
         self._redraw()
 
     def _redraw(self):
+        # Guard: _inner pode não existir se _build ainda não completou ou se o
+        # widget foi destruído mas o trace_add ainda disparou (ex: recovery falha).
+        if not hasattr(self, "_inner") or not self._inner.winfo_exists():
+            return
         for w in self._inner.winfo_children():
             w.destroy()
         self._canvas.yview_moveto(0)
@@ -2484,6 +2805,13 @@ class App:
 
     def _set(self, screen):
         if self._current:
+            # [N-06] Rede de segurança adicional: se por algum motivo uma
+            # VaultScreen for substituída sem passar por _close()/_auto_lock()
+            # (ex: um novo caminho de transição adicionado no futuro), ainda
+            # assim desfazemos os bind_all globais aqui, no único ponto por
+            # onde toda troca de tela do app passa.
+            if isinstance(self._current, VaultScreen):
+                self._current._unbind_activity()
             self._current.destroy()
         self._current = screen
         screen.pack(fill="both", expand=True)
@@ -2504,7 +2832,10 @@ class App:
         if contents is None:
             from core.vault import open_vault_with_passphrase
             contents, kdf_key = open_vault_with_passphrase(passphrase, vault_path)
-        self._set(VaultScreen(self.root, self, contents, passphrase, vault_path, kdf_key=kdf_key))
+        # Não armazenamos a passphrase na VaultScreen — apenas o kdf_key (bytearray, zeroizável)
+        # A passphrase (str imutável) não pode ser zerada em Python; por isso não deve
+        # persistir além do instante de abertura. O kdf_key cobre todas as operações de sessão.
+        self._set(VaultScreen(self.root, self, contents, vault_path, kdf_key=kdf_key))
 
     def run(self):
         self.root.mainloop()

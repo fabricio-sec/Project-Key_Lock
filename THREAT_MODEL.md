@@ -1,6 +1,6 @@
 # Modelo de Ameaças — key_lock
 
-Versão: 2.4.2 | Atualizado: junho 2026
+Versão: 2.4.6 | Atualizado: julho 2026
 
 ---
 
@@ -83,6 +83,19 @@ key_lock é um cofre de senhas local. Não há servidor, sincronização automá
 
 ---
 
+### ✅ PROTEGIDO — Falha durante rotação de credenciais (rekey/recuperação)
+
+**Cenário:** `rotate_master_key()`/`create_vault()` são interrompidas por uma falha (memória insuficiente, disco cheio, encerramento do processo) no meio da operação.
+
+**Proteção:**
+- Corrigido na auditoria de 02/07/2026 (N-01): antes, o novo `.vault` era gravado em disco **antes** do novo mnemônico e do novo `.vaultkey` serem gerados. Uma falha nessa janela (ex: segunda alocação de 256 MB do Argon2id em `build_vaultkey_file`, logo após a primeira derivação) já tinha comprometido o cofre antigo sem nunca produzir o novo mnemônico — invalidando permanentemente a única chave de recuperação que o usuário possuía.
+- Agora, tudo que pode falhar (mnemônico + `.vaultkey`) é gerado e validado em memória **antes** de qualquer escrita em disco. A persistência via `_atomic_write`/`os.replace` é o último passo da operação.
+- Validado por PoC: uma falha simulada na mesma posição do bug original não altera mais nenhum byte do `.vault` — o mnemônico/passphrase antigos continuam válidos.
+
+**Limitação:** Uma falha durante o próprio `os.replace()` (ex: disco cheio no exato instante da renomeação atômica) ainda é teoricamente possível, mas nesse caso o sistema de arquivos garante que o arquivo antigo OU o novo existem por completo — nunca um estado parcial.
+
+---
+
 ### ✅ PROTEGIDO — Força bruta de passphrase online (tentativa repetida)
 
 **Cenário:** Atacante com acesso à interface tenta passphrase incorretas em sequência.
@@ -93,6 +106,8 @@ key_lock é um cofre de senhas local. Não há servidor, sincronização automá
 - O counter é zerado após abertura bem-sucedida.
 
 **Limitação:** Não há bloqueio permanente (lockout) — apenas slowdown. Um atacante com acesso direto ao arquivo pode pular a camada de backoff e atacar offline.
+
+**Limitação adicional (documentada na auditoria de follow-up, junho/2026):** O arquivo `*_fail.json` do contador de falhas **não possui HMAC** — diferente do metadata anti-rollback (`*_{digest}.json`), que é HMAC-protegido. Um atacante local pode deletar ou zerar o arquivo de fail counter sem detecção, eliminando o backoff. Isso não representa uma vulnerabilidade criptográfica (o atacante offline pode ignorar o key_lock completamente e atacar o AES-GCM diretamente), mas é uma inconsistência de design: o meta usa HMAC, o fail counter não. Classificada como **Low / defesa-em-profundidade**.
 
 ---
 
@@ -105,8 +120,9 @@ key_lock é um cofre de senhas local. Não há servidor, sincronização automá
 - Na abertura, o tag é verificado em tempo constante (`hmac.compare_digest`). Falha levanta `MachineMismatchError`.
 - Para autorizar outra máquina legitimamente, o admin copia `machine_secret.key` para o mesmo path.
 - Alternativa: usar o mnemônico e depois `rebind` para re-vincular à nova máquina.
+- **Desde v2.4.3:** se o campo `machine_tag` estiver ausente no `.vault`, um aviso é emitido orientando o uso do `rebind`.
 
-**Limitação:** Se o atacante obtiver tanto o `.vault` quanto o `machine_secret.key`, a vinculação não oferece proteção adicional além do Argon2id.
+**Limitação documentada — Bypass por remoção do `machine_tag`:** Um adversário com acesso de escrita ao arquivo `.vault` **e** posse da passphrase (ou mnemônico) pode remover o campo `machine_tag` do JSON antes de tentar abrir o cofre, burlando completamente o vínculo de máquina. O vínculo de máquina protege contra acesso não-autorizado *sem* a passphrase — não contra adversário que já possui a passphrase e acesso de escrita ao arquivo. Se o arquivo `.vault` foi comprometido (escrita possível), execute `rekey` imediatamente para invalidar as credenciais. Se o `machine_secret.key` foi comprometido, o vínculo também não oferece proteção.
 
 ---
 

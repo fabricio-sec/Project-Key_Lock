@@ -31,13 +31,22 @@ def get_machine_secret() -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     secret = secrets.token_bytes(_SECRET_SIZE)
 
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # [N-07] Usa O_CREAT|O_EXCL (em vez de O_TRUNC) para a criação do segredo
+    # na primeira execução. Duas chamadas concorrentes (ex: GUI e CLI abertas
+    # ao mesmo tempo) poderiam antes gerar segredos DIFERENTES e cada uma
+    # retornar o seu, mesmo que só um deles tivesse sido persistido em disco —
+    # causando um machine_tag mismatch espúrio no processo "perdedor". Com
+    # O_EXCL, se outro processo já venceu a corrida, relemos o que ele
+    # efetivamente persistiu, em vez de confiar no valor gerado localmente.
     try:
-        os.write(fd, secret)
-    finally:
-        os.close(fd)
-
-    return secret
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, secret)
+        finally:
+            os.close(fd)
+        return secret
+    except FileExistsError:
+        return path.read_bytes()
 
 def compute_bind_tag(machine_secret: bytes, vault_salt: bytes) -> str:
     tag = hmac.new(machine_secret, vault_salt, hashlib.sha256).digest()

@@ -1,4 +1,4 @@
-__version__  = "2.4.2"
+__version__  = "2.4.6"
 __author__   = "Fabrício Almeida (https://www.linkedin.com/in/fabrici04/)"
 
 def _get_vault_version() -> int:

@@ -51,6 +51,11 @@ def create_vault(passphrase: str, vault_path: str, vaultkey_pin: str) -> tuple[s
         empty_vault = {"version": VAULT_VERSION, "last_saved": now, "entries": []}
         vault_blob = encrypt_vault(empty_vault, kdf_key, aad=_VAULT_AAD)
 
+        # [N-01] Gera TUDO que pode falhar (mnemônico + .vaultkey) ANTES de gravar
+        # qualquer coisa em disco. Se algo aqui falhar, nada foi persistido ainda.
+        mnemonic_phrase = private_key_to_mnemonic(recovery_private)
+        vaultkey_content = build_vaultkey_file(mnemonic_phrase, salt, vaultkey_pin)
+
         vault_data = {
             "version":         VAULT_VERSION,
             "salt":            bytes_to_b64(salt),
@@ -64,11 +69,10 @@ def create_vault(passphrase: str, vault_path: str, vaultkey_pin: str) -> tuple[s
         except Exception:
             pass
 
+        # Persistência é o ÚLTIMO passo, depois que tudo mais já foi validado com sucesso.
         _atomic_write(vault_path, json.dumps(vault_data, indent=2))
         write_meta(vault_path, now)
 
-        mnemonic_phrase = private_key_to_mnemonic(recovery_private)
-        vaultkey_content = build_vaultkey_file(mnemonic_phrase, salt, vaultkey_pin)
         return mnemonic_phrase, vaultkey_content
     finally:
         secure_zero(kdf_key)
@@ -93,8 +97,27 @@ def open_vault_with_passphrase(
                 raise MachineMismatchError(str(secret_file_path()))
         except MachineMismatchError:
             raise
-        except Exception:
-            pass
+        except Exception as e:
+            # [N-08] Machine binding é defesa em profundidade, não uma barreira
+            # dura (THREAT_MODEL T-01) — por isso um erro inesperado aqui não
+            # deve bloquear a abertura do cofre. Mas engolir em silêncio total
+            # dificultava perceber, em produção, que a proteção parou de
+            # funcionar (ex: permissão negada ao ler/criar o machine_secret.key).
+            # Agora emitimos um aviso não-fatal em vez de silêncio absoluto.
+            import warnings as _warnings
+            _warnings.warn(
+                f"key_lock: não foi possível verificar o vínculo de máquina ({e}). "
+                "A proteção de machine-binding está temporariamente inativa "
+                "para esta sessão.",
+                stacklevel=2,
+            )
+    else:
+        import warnings as _warnings
+        _warnings.warn(
+            "key_lock: este cofre não possui vínculo de máquina (machine_tag ausente). "
+            "Execute 'rebind' para vincular o cofre a esta máquina.",
+            stacklevel=2,
+        )
 
     kdf_key, _ = derive_key_from_passphrase(passphrase, salt)
 
@@ -130,7 +153,23 @@ def open_vault_with_recovery_file(
             "Arquivo possivelmente corrompido ou malicioso."
         )
     file_content = path.read_text().strip()
-    mnemonic_phrase, _ = parse_vaultkey_file(file_content, pin)
+    mnemonic_phrase, vaultkey_vault_salt = parse_vaultkey_file(file_content, pin)
+
+    # B-02: Verifica que o vault_salt no .vaultkey corresponde ao salt do .vault.
+    # Sem essa verificação, o campo vault_salt no .vaultkey era metadado inútil
+    # e não fornecia garantia de que o .vaultkey pertence ao .vault correto.
+    try:
+        vault_data = _load_vault_file(vault_path)
+        actual_salt = b64_to_bytes(vault_data["salt"])
+        if vaultkey_vault_salt != actual_salt:
+            raise ValueError(
+                "O arquivo .vaultkey não pertence a este cofre .vault.\n"
+                "O salt armazenado no .vaultkey não corresponde ao salt do cofre.\n"
+                "Verifique se os arquivos corretos foram selecionados."
+            )
+    except (FileNotFoundError, KeyError, ValueError):
+        raise
+
     return _open_with_mnemonic(mnemonic_phrase, vault_path, force_accept_meta=force_accept_meta)
 
 def open_vault_with_mnemonic(
@@ -245,6 +284,14 @@ def rotate_master_key(
             contents["last_saved"] = now
             new_vault_blob = encrypt_vault(contents, new_kdf_key, aad=_VAULT_AAD)
 
+            # [N-01] Gera o novo mnemônico e o novo .vaultkey ANTES de gravar o
+            # cofre em disco. Isso é o que garante que, se algo falhar aqui, o
+            # cofre antigo permanece intacto e válido — em vez de já termos
+            # substituído o .vault por um novo estado cujo mnemônico/.vaultkey
+            # nunca chegou a ser gerado/devolvido ao chamador.
+            new_mnemonic = private_key_to_mnemonic(new_recovery_private)
+            new_vaultkey_content = build_vaultkey_file(new_mnemonic, new_salt, vaultkey_pin)
+
             new_vault_data = {
                 "version":         VAULT_VERSION,
                 "salt":            bytes_to_b64(new_salt),
@@ -258,11 +305,11 @@ def rotate_master_key(
             except Exception:
                 pass
 
+            # Persistência é o ÚLTIMO passo — só acontece depois que o mnemônico
+            # e o .vaultkey novos já existem com sucesso em memória.
             _atomic_write(vault_path, json.dumps(new_vault_data, indent=2))
             write_meta(vault_path, now)
 
-            new_mnemonic = private_key_to_mnemonic(new_recovery_private)
-            new_vaultkey_content = build_vaultkey_file(new_mnemonic, new_salt, vaultkey_pin)
             return new_mnemonic, new_vaultkey_content
         finally:
             secure_zero(new_kdf_key)
@@ -292,7 +339,9 @@ def add_entry(vault_contents: dict, name: str, username: str,
 
     if not password:
         raise ValueError("A senha da entrada não pode ser vazia.")
-    if len(name) > 200 or len(username) > 200 or len(url) > 2048:
+    # [N-10] password não tinha teto de comprimento (diferente de name/username/url),
+    # permitindo uma entrada com senha de tamanho arbitrário.
+    if len(name) > 200 or len(username) > 200 or len(url) > 2048 or len(password) > 4096:
         raise ValueError("Campo excede o comprimento máximo permitido.")
     if url and not (url.startswith("https://") or url.startswith("http://")):
         url = ""
@@ -345,11 +394,39 @@ def _load_vault_file(vault_path: str) -> dict:
             "Arquivo possivelmente corrompido ou malicioso."
         )
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except json.JSONDecodeError as e:
         raise ValueError(
             f"Arquivo .vault corrompido ou em formato inválido: {e}"
         ) from e
+
+    # [N-05] Valida que o JSON de nível superior é um objeto e que os campos
+    # obrigatórios existem, ANTES de qualquer .get()/indexação — evita
+    # AttributeError (ex: JSON é uma lista) ou KeyError (campos ausentes) não
+    # tratados vazando como traceback cru para o usuário (especialmente na CLI,
+    # que não tem um handler genérico de exceção como a GUI).
+    if not isinstance(data, dict):
+        raise ValueError(
+            "Arquivo .vault inválido: estrutura JSON de nível superior deve "
+            f"ser um objeto, encontrado {type(data).__name__!r}."
+        )
+
+    required_keys = {"salt", "master_key_blob", "vault_blob"}
+    missing_keys = required_keys - data.keys()
+    if missing_keys:
+        raise ValueError(
+            "Arquivo .vault inválido: campo(s) obrigatório(s) ausente(s): "
+            f"{', '.join(sorted(missing_keys))}."
+        )
+
+    # P-01: Valida tipo do campo version para evitar type confusion (TypeError não tratado)
+    raw_version = data.get("version", 2)
+    if not isinstance(raw_version, int):
+        raise ValueError(
+            f"Arquivo .vault inválido: campo 'version' deve ser inteiro, "
+            f"encontrado tipo {type(raw_version).__name__!r}."
+        )
+    return data
 
 def _generate_id() -> str:
     import uuid
